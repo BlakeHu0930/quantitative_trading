@@ -1,16 +1,18 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 量化交易 CLI
-用法: python cli.py <命令> [选项]
+用法: python3 cli.py <命令> [选项]   （自动使用/创建项目 venv，无需手动激活）
 
 命令:
-  analyze   分析股票（获取数据 + 指标 + 信号 + 回测）
-  backtest  用指定参数回测
-  optimize  策略参数优化（网格搜索）
-  trade     启动自动交易
-  info      查询股票基础信息
-  run-all   完整流水线（分析 → 优化 → 可选自动交易）
+  analyze     分析股票（获取数据 + 指标 + 信号 + 回测）
+  backtest    用指定参数回测
+  optimize    策略参数优化（网格搜索）
+  trade       启动自动交易
+  info        查询股票基础信息
+  run-all     完整流水线（分析 → 优化 → 可选自动交易）
+  strategies  列出可用策略
+  repl        交互模式（无参数运行等效）
 """
 
 import argparse
@@ -20,12 +22,36 @@ import os
 import sys
 from datetime import datetime
 
+
+def _ensure_venv():
+    """不在项目 venv 中运行时自动切换过去；venv 不存在则创建并安装依赖。"""
+    root = os.path.dirname(os.path.abspath(__file__))
+    venv_dir = os.path.join(root, "venv")
+    bin_dir = "Scripts" if os.name == "nt" else "bin"
+    venv_py = os.path.join(venv_dir, bin_dir, "python")
+    if os.path.realpath(sys.prefix) == os.path.realpath(venv_dir):
+        return  # 已在项目 venv 中
+    if not os.path.exists(venv_py):
+        import subprocess
+        import venv as venv_mod
+        print("首次运行：正在创建虚拟环境并安装依赖（约 1-2 分钟）...")
+        venv_mod.create(venv_dir, with_pip=True)
+        subprocess.check_call(
+            [venv_py, "-m", "pip", "install", "-q", "-r", os.path.join(root, "requirements.txt")]
+        )
+        print("✓ 依赖安装完成\n")
+    os.execv(venv_py, [venv_py, os.path.abspath(__file__)] + sys.argv[1:])
+
+
+_ensure_venv()
+
 import pandas as pd
 
 from src.config import (
     DEFAULT_STOCKS, DEFAULT_INDICATOR_PARAMS, DEFAULT_BACKTEST, DEFAULT_TRADE,
-    OPTIMIZE_PARAM_NAMES, analysis_csv_path, symbol_from_analysis_file, symbol_to_stem,
+    analysis_csv_path, symbol_from_analysis_file, symbol_to_stem,
 )
+from src.strategies import STRATEGIES, DEFAULT_STRATEGIES, strategy_choices
 
 
 # ─────────────────────────────────────────────
@@ -82,7 +108,8 @@ def _ensure_dirs():
 #  核心分析流程（analyze / run-all 共用）
 # ─────────────────────────────────────────────
 
-def _run_single_analysis(symbol: str, days: int, capital: float, indicator_params: dict) -> dict:
+def _run_single_analysis(symbol: str, days: int, capital: float, indicator_params: dict,
+                         strategies: list = None) -> dict:
     """获取数据 → 指标 → 信号 → 回测，返回 {df, metrics, trades}。"""
     from src.data import fetch_ohlcv
     from src.indicators import calculate_indicators
@@ -95,8 +122,8 @@ def _run_single_analysis(symbol: str, days: int, capital: float, indicator_param
     print("  计算技术指标...")
     df = calculate_indicators(df, indicator_params)
 
-    print("  生成交易信号...")
-    df = generate_signals(df, indicator_params)
+    print(f"  生成交易信号（策略: {' '.join(strategies or DEFAULT_STRATEGIES)}）...")
+    df = generate_signals(df, indicator_params, strategies=strategies)
 
     print("  执行回测...")
     df, metrics, trades = backtest(df, initial_capital=capital)
@@ -104,16 +131,18 @@ def _run_single_analysis(symbol: str, days: int, capital: float, indicator_param
     return {"df": df, "metrics": metrics, "trades": trades}
 
 
-def _analyze_and_save(sym: str, days: int, capital: float, indicator_params: dict, trade_config: dict):
+def _analyze_and_save(sym: str, days: int, capital: float, indicator_params: dict, trade_config: dict,
+                      strategies: list = None):
     """分析单只股票，打印报告，保存 CSV + 参数 JSON。返回 (result, csv_path)。"""
-    result = _run_single_analysis(sym, days, capital, indicator_params)
+    result = _run_single_analysis(sym, days, capital, indicator_params, strategies=strategies)
     _print_analysis_report(sym, result, indicator_params, trade_config)
     csv_path = analysis_csv_path(sym)
     result["df"].to_csv(csv_path, index=False)
     _save_run_params(
         csv_path.replace(".csv", "_params.json"),
         {"symbol": sym, "days": days, "capital": capital,
-         "indicator_params": indicator_params, "timestamp": datetime.now().isoformat()},
+         "indicator_params": indicator_params, "strategies": strategies or DEFAULT_STRATEGIES,
+         "timestamp": datetime.now().isoformat()},
     )
     return result, csv_path
 
@@ -184,7 +213,8 @@ def cmd_analyze(args):
         print(f"  分析: {sym}")
         print(f"{'═'*60}")
         try:
-            result, csv_path = _analyze_and_save(sym, args.days, capital, indicator_params, trade_config)
+            result, csv_path = _analyze_and_save(sym, args.days, capital, indicator_params, trade_config,
+                                                 strategies=args.strategies)
             all_results[sym] = result
             print(f"\n  ✓ 结果已保存: {csv_path}")
         except Exception as e:
@@ -217,7 +247,7 @@ def cmd_backtest(args):
     from src.backtest import backtest
 
     df = calculate_indicators(df_raw, indicator_params)
-    df = generate_signals(df, indicator_params)
+    df = generate_signals(df, indicator_params, strategies=args.strategies)
     df, metrics, trades = backtest(df, initial_capital=capital)
 
     sym = args.symbol or (args.file and symbol_from_analysis_file(args.file)) or "backtest"
@@ -237,13 +267,17 @@ def cmd_backtest(args):
     df.to_csv(out, index=False)
     _save_run_params(out.replace(".csv", "_params.json"),
                      {"symbol": sym, "indicator_params": indicator_params,
+                      "strategies": args.strategies or DEFAULT_STRATEGIES,
                       "capital": capital, "timestamp": datetime.now().isoformat()})
     print(f"\n  ✓ 回测结果已保存: {out}")
 
 
 def cmd_optimize(args):
     _ensure_dirs()
-    from src.optimizer import optimize_strategy, save_optimization_results, plot_optimization_results, top_results
+    from src.optimizer import (
+        optimize_strategy, save_optimization_results, plot_optimization_results,
+        top_results, format_params,
+    )
 
     # 加载数据
     if args.file:
@@ -261,7 +295,7 @@ def cmd_optimize(args):
             print(f"获取 {args.symbol} K 线数据...")
             df = fetch_ohlcv(args.symbol, count=200)
             df = calculate_indicators(df)
-            df = generate_signals(df)
+            df = generate_signals(df, strategies=args.strategies)
     else:
         print("错误：请指定 --symbol 或 --file")
         sys.exit(1)
@@ -271,10 +305,11 @@ def cmd_optimize(args):
         df = df.tail(100).reset_index(drop=True)
 
     print(f"\n开始优化（指标: {args.metric}）...")
-    results, best_params, best_value = optimize_strategy(df, metric=args.metric)
+    results, best_params, best_value, param_names = optimize_strategy(
+        df, metric=args.metric, strategies=args.strategies)
 
     sym = args.symbol or (args.file and symbol_from_analysis_file(args.file)) or "unknown"
-    _section(f"优化结果  {sym}  指标: {args.metric}")
+    _section(f"优化结果  {sym}  指标: {args.metric}  策略: {' '.join(args.strategies or DEFAULT_STRATEGIES)}")
     print(f"  最优参数:")
     for k, v in best_params.items():
         print(f"    {k:<20} {v}")
@@ -284,11 +319,11 @@ def cmd_optimize(args):
     _section("前 10 参数组合")
     top10 = top_results(results, 10)
     for rank, (params, score) in enumerate(top10, 1):
-        p = dict(zip(OPTIMIZE_PARAM_NAMES, params))
-        print(f"  #{rank:>2}  MA{p['ma_short']}/{p['ma_long']}  RSI{p['rsi_period']}({p['rsi_oversold']}/{p['rsi_overbought']})  得分 {score:.4f}")
+        print(f"  #{rank:>2}  {format_params(param_names, params)}  得分 {score:.4f}")
 
-    json_path = save_optimization_results(results, best_params, best_value, sym, args.metric)
-    chart_path = plot_optimization_results(results, args.metric, sym)
+    json_path = save_optimization_results(results, best_params, best_value, sym, args.metric,
+                                          param_names, strategies=args.strategies)
+    chart_path = plot_optimization_results(results, args.metric, sym, param_names)
     print(f"\n  ✓ 结果已保存: {json_path}")
     print(f"  ✓ 图表已保存: {chart_path}")
 
@@ -326,6 +361,26 @@ def cmd_info(args):
         print(f"  查询行情失败: {e}")
 
 
+def cmd_strategies(args):
+    _section("可用策略")
+    for strat in STRATEGIES.values():
+        mark = "[默认]" if strat.key in DEFAULT_STRATEGIES else "      "
+        print(f"  {strat.key:<10} {mark}  {strat.description}")
+        if strat.param_ranges:
+            ranges = "  ".join(f"{k}={v}" for k, v in strat.param_ranges.items())
+            print(f"             优化空间: {ranges}")
+        else:
+            print("             （无可优化参数）")
+    _hr()
+    print("  用法: --strategies <key> [<key> ...]，列表中靠后的策略信号覆盖靠前的")
+    print(f"  默认: {' '.join(DEFAULT_STRATEGIES)}")
+
+
+def cmd_repl(args):
+    from src.repl import run_repl
+    run_repl(build_parser())
+
+
 def cmd_run_all(args):
     _ensure_dirs()
     symbols = args.symbols if args.symbols else DEFAULT_STOCKS
@@ -341,7 +396,8 @@ def cmd_run_all(args):
     for sym in symbols:
         print(f"\n── {sym} ──")
         try:
-            result, csv_path = _analyze_and_save(sym, args.days, capital, indicator_params, trade_config)
+            result, csv_path = _analyze_and_save(sym, args.days, capital, indicator_params, trade_config,
+                                                 strategies=args.strategies)
             all_results[sym] = result
             print(f"  ✓ {csv_path}")
         except Exception as e:
@@ -362,9 +418,11 @@ def cmd_run_all(args):
             try:
                 from src.optimizer import optimize_strategy, save_optimization_results, plot_optimization_results
                 df_opt = pd.read_csv(csv_path).tail(100).reset_index(drop=True)
-                results, best_params, best_value = optimize_strategy(df_opt)
-                json_path = save_optimization_results(results, best_params, best_value, first_sym, "sharpe_ratio")
-                chart_path = plot_optimization_results(results, "sharpe_ratio", first_sym)
+                results, best_params, best_value, param_names = optimize_strategy(
+                    df_opt, strategies=args.strategies)
+                json_path = save_optimization_results(results, best_params, best_value, first_sym,
+                                                      "sharpe_ratio", param_names, strategies=args.strategies)
+                chart_path = plot_optimization_results(results, "sharpe_ratio", first_sym, param_names)
                 print(f"  ✓ 优化完成  最优参数: {best_params}")
                 print(f"  ✓ {json_path}")
                 print(f"  ✓ {chart_path}")
@@ -479,6 +537,12 @@ def _add_indicator_args(parser):
     g.add_argument("--rsi-overbought", type=int, metavar="N", help=f"RSI 超买阈值 (默认 {DEFAULT_INDICATOR_PARAMS['rsi_overbought']})")
 
 
+def _add_strategy_args(parser):
+    parser.add_argument("--strategies", nargs="+", choices=strategy_choices(), metavar="STRAT",
+                        help=f"启用的策略集，后者信号覆盖前者 (默认 {' '.join(DEFAULT_STRATEGIES)}；"
+                             f"可选 {' '.join(strategy_choices())}，用 strategies 命令查看说明)")
+
+
 def _add_trade_args(parser):
     g = parser.add_argument_group("风险参数")
     g.add_argument("--mode", choices=["paper", "live"], default=DEFAULT_TRADE["mode"],
@@ -518,6 +582,11 @@ def build_parser() -> argparse.ArgumentParser:
   python cli.py info --symbol AAPL.US
 
   python cli.py run-all --auto-trade
+
+其他:
+  python cli.py                    # 无参数进入交互模式（REPL）
+  python cli.py strategies         # 查看可用策略
+  python cli.py backtest --file results/700_HK_analysis.csv --strategies bollinger trend
 """,
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -531,6 +600,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_analyze.add_argument("--capital", type=float, default=DEFAULT_BACKTEST["initial_capital"],
                            help=f"回测初始资金 (默认 {DEFAULT_BACKTEST['initial_capital']})")
     p_analyze.add_argument("--portfolio", action="store_true", help="多股票时输出投资组合分析")
+    _add_strategy_args(p_analyze)
     _add_indicator_args(p_analyze)
     _add_trade_args(p_analyze)
     p_analyze.set_defaults(func=cmd_analyze)
@@ -542,6 +612,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_bt.add_argument("--days", type=int, default=100, help="K 线根数 (默认 100)")
     p_bt.add_argument("--capital", type=float, default=DEFAULT_BACKTEST["initial_capital"],
                       help=f"初始资金 (默认 {DEFAULT_BACKTEST['initial_capital']})")
+    _add_strategy_args(p_bt)
     _add_indicator_args(p_bt)
     p_bt.set_defaults(func=cmd_backtest)
 
@@ -552,6 +623,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_opt.add_argument("--metric", choices=["sharpe_ratio", "returns", "drawdown"],
                        default="sharpe_ratio", help="优化目标 (默认 sharpe_ratio)")
     p_opt.add_argument("--no-limit", action="store_true", help="不限制数据量（默认最近 100 条）")
+    _add_strategy_args(p_opt)
     p_opt.set_defaults(func=cmd_optimize)
 
     # ── trade ──────────────────────────────
@@ -574,9 +646,18 @@ def build_parser() -> argparse.ArgumentParser:
                        help=f"初始资金 (默认 {DEFAULT_BACKTEST['initial_capital']})")
     p_all.add_argument("--no-optimize", action="store_true", help="跳过参数优化步骤")
     p_all.add_argument("--auto-trade", action="store_true", help="完成后启动自动交易")
+    _add_strategy_args(p_all)
     _add_indicator_args(p_all)
     _add_trade_args(p_all)
     p_all.set_defaults(func=cmd_run_all)
+
+    # ── strategies ──────────────────────────────
+    p_strat = sub.add_parser("strategies", help="列出可用策略及参数空间")
+    p_strat.set_defaults(func=cmd_strategies)
+
+    # ── repl ──────────────────────────────
+    p_repl = sub.add_parser("repl", help="进入交互模式（python cli.py 无参数等效）")
+    p_repl.set_defaults(func=cmd_repl)
 
     return parser
 
@@ -587,6 +668,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main():
     parser = build_parser()
+    # 无参数直接进 REPL（subparsers required=True，须在 parse_args 之前拦截）
+    if len(sys.argv) == 1:
+        from src.repl import run_repl
+        run_repl(parser)
+        return
     args = parser.parse_args()
     args.func(args)
 

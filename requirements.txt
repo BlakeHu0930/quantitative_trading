@@ -1,4 +1,7 @@
 pandas
 numpy
+matplotlib
+tqdm
 python-dotenv
-longport 
+longport
+prompt_toolkit

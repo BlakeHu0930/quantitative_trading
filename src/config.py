@@ -31,6 +31,7 @@ DEFAULT_INDICATOR_PARAMS = {
     "macd_signal": 9,
     "bb_period": 20,
     "bb_std": 2,
+    "donchian_period": 20,
 }
 
 DEFAULT_BACKTEST = {
