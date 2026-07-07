@@ -1,291 +1,170 @@
-# 量化交易程序
+# 量化交易系统
 
-基于长桥API和DeepSeek AI的量化交易分析工具，使用pandas进行技术指标分析。
+基于长桥（LongPort）OpenAPI 的量化交易分析与自动交易工具。无 AI 依赖，纯技术指标驱动——**可回测、可解释、可复现**。
+
+支持港股与美股（`700.HK` / `AAPL.US`）。
 
 ## 功能特点
 
-- 获取实时股票数据
-- 计算常用技术指标（MA, RSI, MACD, 布林带等）
-- 生成交易信号和策略
-- 进行历史数据回测
-- 使用DeepSeek AI进行市场分析和预测
-- 数据结果导出为CSV文件
-- **多股票组合分析和投资组合优化**
-- **策略参数优化和敏感性分析**
-- **自动化分析流程和汇总报告生成**
-- **自动化交易执行（模拟交易和实盘交易）**
+- 单一 CLI 入口 + 交互式 REPL（子命令补全、历史记录）
+- 技术指标：MA / RSI / MACD / 布林带 / 唐奇安通道
+- **可插拔策略注册表**：6 种内置策略自由组合，信号带中文触发原因（`Signal_Reason`）
+- 历史回测：完整交易记录（含每笔盈亏）、夏普比率、最大回撤、胜率
+- 策略参数优化：多进程网格搜索，网格随所选策略动态生成
+- 多股票组合分析：相关性矩阵、基于夏普比率的权重优化
+- 自动交易：paper 模拟盘 / live 实盘，止损止盈、交易时段门控、防重复下单
+- 可复现：每次运行的参数（含策略集）保存为 JSON sidecar
 
-## 环境要求
+## 快速开始
 
-- Python 3.8+
-- pandas
-- numpy
-- matplotlib
-- requests
-- python-dotenv
-- longport
-- tqdm
-
-## 安装
-
-1. 克隆代码库
 ```bash
 git clone <repository-url>
 cd quantitative_trading
-```
 
-2. 安装依赖包
-```bash
-pip install pandas numpy matplotlib longport python-dotenv requests tqdm
-```
-
-3. 配置API密钥
-在项目根目录创建`.env`文件，并添加以下内容：
-```
+# 配置 LongPort API 密钥（https://open.longportapp.com 申请）
+cat > .env <<'ENV'
 LONGPORT_APP_KEY="your_app_key"
-LONGPORT_APP_SECRET="your_app_secret" 
+LONGPORT_APP_SECRET="your_app_secret"
 LONGPORT_ACCESS_TOKEN="your_access_token"
-DEEPSEEK_API_KEY="your_deepseek_api_key"
+ENV
+
+# 直接运行——首次运行自动创建虚拟环境并安装依赖，无需手动 pip install / activate
+python3 cli.py
 ```
 
-## 使用方法
+需要 Python 3.9+。依赖见 `requirements.txt`（pandas、numpy、matplotlib、longport、python-dotenv、tqdm、prompt_toolkit），由 `cli.py` 自动安装。
 
-### 一键运行所有分析
+## 交互模式（REPL）
 
-运行所有分析流程并生成汇总报告：
+`python3 cli.py` 无参数进入交互模式：
+
+```
+量化交易 REPL — help 查看命令, use <代码> 设置当前股票, exit 退出
+quant> use AAPL.US
+quant[AAPL.US]> analyze              # 自动带上 --symbol AAPL.US
+quant[AAPL.US]> backtest
+quant[AAPL.US]> trade --mode paper
+quant[AAPL.US]> exit
+```
+
+支持子命令 / 选项 / 股票代码 / 策略名补全（Tab），历史记录保存在 `~/.quant_cli_history`。
+
+## 命令一览
+
 ```bash
-python run_all_analysis.py
+# 分析：拉数据 → 指标 → 信号 → 回测，保存 CSV
+python3 cli.py analyze --symbol 700.HK
+python3 cli.py analyze --symbols 700.HK 9988.HK 1211.HK --portfolio   # 多股票 + 组合分析
+python3 cli.py analyze --symbol AAPL.US --strategies bollinger trend  # 指定策略组合
+
+# 回测：指定参数（可复现）；--file 离线跑，不需要 LongPort
+python3 cli.py backtest --symbol 700.HK --ma-short 5 --ma-long 20 --capital 200000
+python3 cli.py backtest --file results/700_HK_analysis.csv --strategies donchian
+
+# 优化：多进程网格搜索最优参数
+python3 cli.py optimize --symbol 700.HK --metric sharpe_ratio   # sharpe_ratio | returns | drawdown
+python3 cli.py optimize --file results/700_HK_analysis.csv --strategies bollinger donchian
+
+# 自动交易（默认 paper 模拟盘）
+python3 cli.py trade --symbol AAPL.US --mode paper
+python3 cli.py trade --symbol AAPL.US --mode paper --outside-rth   # 美股含盘前盘后
+
+# 其他
+python3 cli.py strategies            # 列出全部策略及可优化参数
+python3 cli.py info --symbol 700.HK  # 手数 / 最新价
+python3 cli.py run-all               # 完整流水线：分析 → 组合 → 优化 → 汇总报告
+python3 cli.py run-all --symbols 700.HK 9988.HK --auto-trade --mode paper
 ```
 
-这将依次执行：
-1. 单股票基本分析
-2. 多股票组合分析
-3. 策略参数优化
-4. 生成汇总报告
+## 策略
 
-### 运行分析和自动交易
+策略注册表见 `src/strategies.py`，用 `--strategies` 自由组合，列表中**靠后的策略信号覆盖靠前的**：
 
-运行分析并启动自动交易功能：
+| key | 策略 | 可优化参数 |
+|---|---|---|
+| `ma_cross` | 均线金叉/死叉（默认） | ma_short, ma_long |
+| `rsi` | RSI 超买超卖（默认） | rsi_period, rsi_oversold, rsi_overbought |
+| `macd` | MACD 金叉/死叉（默认） | — |
+| `bollinger` | 布林带均值回归 | bb_period, bb_std |
+| `trend` | 趋势线穿越（收盘价上/下穿 MA_trend） | ma_trend |
+| `donchian` | 唐奇安通道突破（N 日最高/最低价） | donchian_period |
+
+默认策略集 `ma_cross rsi macd`：
+- 买入 (1)：MA 金叉 | RSI < 30 | MACD 金叉
+- 卖出 (-1)：MA 死叉 | RSI > 70 | MACD 死叉
+
+每个信号都带 `Signal_Reason` 列说明触发原因（如 "MA5/MA10 金叉"、"跌破布林下轨 (20日,2σ)"），回测交易记录同样带原因和单笔盈亏。
+
+优化器（`optimize`）的搜索网格 = 所选策略声明的参数子空间的并集，结果 JSON 记录 `strategies` 字段。
+
+## 风险控制
+
+**命令行参数**（单次生效，单位 %）：
+
 ```bash
-python run_all_analysis.py --auto-trade
+python3 cli.py trade --mode paper --stop-loss 5 --take-profit 15 --max-positions 5 --position-size 20
 ```
 
-### 仅运行自动交易
+**默认值**（改一次永久生效）：`src/config.py` 中的 `DEFAULT_TRADE`：
 
-仅启动自动交易功能（不运行分析）：
-```bash
-python run_all_analysis.py --only-auto-trade
-```
-
-### 单独运行自动交易
-
-也可以单独运行自动交易脚本：
-```bash
-python auto_trader.py
-```
-
-### 基本分析
-
-运行主程序分析单个股票：
-```bash
-python quant_trading.py
-```
-
-### 多股票组合分析
-
-运行多股票分析程序：
-```bash
-python multi_stock_analysis.py
-```
-
-这将分析预设的多只股票，并提供组合投资建议。
-
-### 策略参数优化
-
-运行策略优化程序：
-```bash
-python strategy_optimizer.py --file results/700_HK_analysis.csv --symbol 700.HK --metric sharpe_ratio
-```
-
-参数说明：
-- `--file`: 股票数据CSV文件路径
-- `--symbol`: 股票代码
-- `--metric`: 优化指标，可选 "sharpe_ratio"(夏普比率), "returns"(收益率), "drawdown"(最大回撤)
-
-## 程序说明
-
-### 自动交易 (auto_trader.py)
-
-自动交易程序执行以下功能：
-1. 读取分析结果中的交易信号
-2. 根据信号自动执行买入/卖出操作
-3. 管理持仓和订单状态
-4. 实现止损和止盈功能
-5. 支持模拟交易和实盘交易两种模式
-6. 保存和恢复交易状态
-
-自动交易配置可在脚本中的`TRADE_CONFIG`字典中修改：
 ```python
-TRADE_CONFIG = {
-    "mode": "paper",  # "paper"(模拟交易) 或 "live"(实盘交易)
-    "capital_limit": 100000,  # 交易资金限制
-    "max_positions": 5,  # 最大持仓股票数量
-    "position_size": 0.2,  # 单个仓位占总资金的比例 (20%)
-    "stop_loss": 0.05,  # 止损比例 (5%)
-    "take_profit": 0.15,  # 止盈比例 (15%)
-    "trading_hours": {
-        "HK": {"start": "09:30", "end": "16:00"}  # 香港市场交易时间
-    }
+DEFAULT_TRADE = {
+    "mode": "paper",         # paper 模拟盘 / live 实盘
+    "max_positions": 5,      # 最大持仓股票数
+    "position_size": 0.2,    # 单仓占可用资金比例（20%）
+    "stop_loss": 0.05,       # 止损 5%（小数，非百分比）
+    "take_profit": 0.15,     # 止盈 15%
+    "check_interval": 10,    # 交易循环间隔（秒）
+    "order_cooldown": 300,   # 同标的同方向下单最小间隔（秒），防拒单后无限重试
+    ...
 }
 ```
 
-### 一键分析 (run_all_analysis.py)
+交易循环每 `check_interval` 秒检查一次持仓浮动盈亏，触发止损/止盈自动卖出。内置安全机制：
 
-全流程分析程序执行以下步骤：
-1. 检查环境和API密钥配置
-2. 创建必要的目录结构
-3. 运行单股票基本分析
-4. 运行多股票组合分析
-5. 运行策略参数优化
-6. 收集所有结果并生成汇总报告（Markdown格式）
-7. 可选：启动自动交易功能
+- 止损/止盈与信号交易都受**交易时段门控**（港股 09:30–16:00 本地时间，美股 09:30–16:00 美东时间；`--outside-rth` 放开美股盘前盘后）
+- **防重复下单**：同标的同方向已有在场订单不再下单；每次下单尝试后进入 `order_cooldown` 冷却
+- 默认 paper 模拟盘，实盘需显式 `--mode live`
 
-### 基本分析 (quant_trading.py)
+## 输出位置
 
-主程序执行以下步骤：
-1. 获取指定股票的K线数据
-2. 计算技术指标
-3. 生成交易信号
-4. 进行策略回测
-5. 通过AI分析市场走势
-6. 保存分析结果到CSV文件
-
-### 多股票分析 (multi_stock_analysis.py)
-
-多股票分析程序执行以下步骤：
-1. 获取多只股票的K线数据
-2. 为每只股票计算技术指标和交易信号
-3. 对每只股票进行回测
-4. 生成每只股票的AI分析报告
-5. 计算股票相关性矩阵
-6. 基于夏普比率优化投资组合权重
-7. 保存结果到CSV文件
-
-### 策略优化 (strategy_optimizer.py)
-
-策略优化程序执行以下步骤：
-1. 读取股票数据
-2. 在多个参数组合上测试策略表现
-3. 找出最优参数组合
-4. 绘制优化结果图表
-5. 分析参数敏感性
-6. 使用最优参数重新回测
-7. 保存优化结果和图表
-
-## 交易信号
-
-本程序生成的交易信号基于以下策略：
-
-- MA5与MA10的黄金交叉（买入）和死亡交叉（卖出）
-- RSI超买（>70，卖出）和超卖（<30，买入）信号
-- MACD与信号线的交叉
-
-## 自动交易功能
-
-自动交易功能具有以下特点：
-
-- 自动处理交易信号并执行交易
-- 支持模拟交易和实盘交易模式
-- 实现止损和止盈功能
-- 按整手（100股）计算买入数量
-- 根据配置控制仓位比例和风险
-- 交易状态持久化，支持程序重启后恢复
-
-## 投资组合分析
-
-投资组合分析具有以下功能：
-
-- 计算股票间的相关性矩阵
-- 基于夏普比率优化投资组合权重
-- 计算组合的预期收益率和风险
-- 生成投资建议
-
-## 策略优化功能
-
-策略优化工具支持：
-
-- 对多个策略参数进行网格搜索
-- 针对不同指标（夏普比率、收益率、最大回撤）的优化
-- 参数敏感性分析
-- 生成优化结果可视化图表
-- 保存优化后的策略参数和回测数据
-
-## 输出结果
-
-程序会输出以下结果：
-- 回测结果（累计收益率、年化收益率、最大回撤、夏普比率）
-- 最近交易信号
-- AI市场分析报告
-- CSV文件（包含所有技术指标和交易信号）
-- 投资组合分析结果
-- 策略优化结果和图表
-- Markdown格式的汇总分析报告
-- 交易状态和执行记录
+| 产物 | 路径 |
+|---|---|
+| 股票分析 | `results/<SYM>_analysis.csv` |
+| 运行参数（含策略集） | `results/<SYM>_analysis_params.json` |
+| 回测结果 | `results/<SYM>_backtest_<ts>.csv` |
+| 投资组合 | `results/portfolio_allocation.csv` |
+| 交易状态 | `results/trading_state.json` |
+| 优化结果 | `results/optimizations/<sym>/optimization_<ts>.json` |
+| 汇总报告 | `results/summary_report_<ts>.md` |
+| 优化图表 | `plots/optimizations/` |
 
 ## 项目结构
 
 ```
 quantitative_trading/
-├── .env                      # API密钥配置文件
-├── quant_trading.py          # 基本分析程序
-├── multi_stock_analysis.py   # 多股票分析程序
-├── strategy_optimizer.py     # 策略优化程序
-├── auto_trader.py            # 自动交易程序
-├── run_all_analysis.py       # 一键运行所有分析
-├── README.md                 # 项目说明文档
-├── results/                  # 分析结果目录
-│   ├── portfolio_allocation.csv  # 投资组合配置
-│   ├── *_analysis.csv        # 各股票分析结果
-│   ├── summary_report_*.md   # 汇总报告
-│   ├── trading_state.json    # 交易状态记录
-│   └── optimizations/        # 优化结果
-├── plots/                    # 图表目录
-│   └── optimizations/        # 优化图表
+├── cli.py                    # 唯一 CLI 入口（自动引导 venv）
+├── src/
+│   ├── config.py             # 默认参数、股票列表、路径约定
+│   ├── data.py               # LongPort 数据拉取
+│   ├── indicators.py         # 技术指标计算
+│   ├── strategies.py         # 策略注册表
+│   ├── signals.py            # 信号生成（Trade_Signal + Signal_Reason）
+│   ├── backtest.py           # 回测引擎
+│   ├── portfolio.py          # 投资组合分析
+│   ├── optimizer.py          # 多进程网格搜索
+│   ├── trader.py             # 自动交易（AutoTrader + 交易循环）
+│   └── repl.py               # 交互模式
+├── requirements.txt
+├── results/                  # 分析结果（运行时生成）
+└── plots/                    # 图表（运行时生成）
 ```
 
-## 示例输出
-
-```
-正在获取 700.HK 的K线数据...
-计算技术指标...
-生成交易信号...
-进行回测...
-
-回测结果:
-累计收益率: 15.23%
-年化收益率: 45.67%
-最大回撤: 8.75%
-夏普比率: 1.92
-
-最近交易信号:
-                  time    close  Signal
-2023-06-01  2023-06-01T00:00:00  380.40      0
-2023-06-02  2023-06-02T00:00:00  382.60      1
-2023-06-03  2023-06-03T00:00:00  379.80     -1
-2023-06-04  2023-06-04T00:00:00  385.20      0
-2023-06-05  2023-06-05T00:00:00  390.40      1
-
-通过AI进行市场分析...
-[AI分析结果将显示在这里]
-
-分析结果已保存到 700_HK_analysis.csv
-```
+旧版脚本（`quant_trading.py`、`multi_stock_analysis.py`、`strategy_optimizer.py`、`auto_trader.py`、`run_all_analysis.py`）仍可独立运行，但不再维护，功能已全部并入 `cli.py`。
 
 ## 注意事项
 
 - 本程序仅供学习和研究使用，不构成投资建议
-- 交易决策请自行判断，使用真实资金交易前请充分测试策略
-- API密钥信息请妥善保管，不要泄露给他人
-- 策略优化可能需要较长时间，请耐心等待
-- 投资组合建议仅作参考，实际投资决策应考虑更多因素
-- 默认为模拟交易模式，切换到实盘交易前请务必谨慎评估风险 
+- 交易决策请自行判断，使用真实资金前请在 paper 模拟盘充分测试策略
+- API 密钥请妥善保管，`.env` 不要提交到版本库
+- 默认为模拟交易模式，切换 `--mode live` 实盘前请务必谨慎评估风险
