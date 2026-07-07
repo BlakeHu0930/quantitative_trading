@@ -47,6 +47,7 @@ DEFAULT_TRADE = {
     "stop_loss": 0.05,
     "take_profit": 0.15,
     "check_interval": 10,
+    "order_cooldown": 300,       # 同一标的同方向两次下单的最小间隔（秒），防止拒单后无限重试
     "outside_rth": False,        # 美股盘前/盘后交易开关
     # tz=None 表示使用系统本地时间判断
     "trading_hours": {

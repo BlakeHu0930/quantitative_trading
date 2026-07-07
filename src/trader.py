@@ -41,6 +41,14 @@ class _StateEncoder(json.JSONEncoder):
         return super().default(o)
 
 
+def _order_finished(status) -> bool:
+    """订单是否已终结（拒单/取消/过期/全部成交）。部分成交仍在场内。"""
+    s = str(status).upper()
+    if any(t in s for t in ("REJECTED", "CANCELED", "CANCELLED", "EXPIRED")):
+        return True
+    return "FILLED" in s and "PARTIAL" not in s
+
+
 class AutoTrader:
     """自动化交易（支持 paper / live 两种模式）。"""
 
@@ -49,6 +57,7 @@ class AutoTrader:
         self.positions: dict = {}
         self.orders: dict = {}
         self._lot_sizes: dict = {}  # 手数是静态的，按 symbol 缓存
+        self._last_order_attempt: dict = {}  # (symbol, side) → time.time()，下单冷却
         self.trade_ctx = None
         self.quote_ctx = None
         self.is_trading = False
@@ -137,8 +146,25 @@ class AutoTrader:
             self._lot_sizes[symbol] = get_lot_size(symbol, quote_ctx=self.quote_ctx)
         return self._lot_sizes[symbol]
 
+    def _can_submit(self, symbol: str, side: str) -> bool:
+        """防重复下单：同标的同方向已有在场订单、或距上次尝试不足 order_cooldown 秒时不下单。"""
+        if any(
+            o["symbol"] == symbol and o["side"] == side and not _order_finished(o["status"])
+            for o in self.orders.values()
+        ):
+            logger.debug(f"{symbol} 已有在场{side}单，跳过")
+            return False
+        last = self._last_order_attempt.get((symbol, side))
+        if last and time.time() - last < self.cfg.get("order_cooldown", 300):
+            logger.debug(f"{symbol} {side}单冷却中，跳过")
+            return False
+        return True
+
     def _submit_order(self, symbol: str, side: OrderSide, price: float, quantity: int) -> str:
         """构造并提交限价单，记录到 self.orders，返回 order_id。"""
+        side_name = "Buy" if side == OrderSide.Buy else "Sell"
+        # 无论提交成功与否都进入冷却，避免异常/拒单时每个循环重试
+        self._last_order_attempt[(symbol, side_name)] = time.time()
         order_kwargs = dict(
             symbol=symbol,
             order_type=OrderType.LO,
@@ -153,7 +179,7 @@ class AutoTrader:
         result = self.trade_ctx.submit_order(**order_kwargs)
         oid = result.order_id
         self.orders[oid] = {
-            "symbol": symbol, "side": "Buy" if side == OrderSide.Buy else "Sell",
+            "symbol": symbol, "side": side_name,
             "quantity": quantity, "price": float(price), "status": "submitted",
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
@@ -165,6 +191,8 @@ class AutoTrader:
             return False
         if len(self.positions) >= self.cfg["max_positions"]:
             logger.info("持仓数达上限，跳过买入")
+            return False
+        if not self._can_submit(symbol, "Buy"):
             return False
 
         # 查可用资金（按股票货币过滤）
@@ -212,6 +240,8 @@ class AutoTrader:
     async def place_sell_order(self, symbol: str, price: float) -> bool:
         if symbol not in self.positions:
             logger.info(f"未持有 {symbol}，跳过卖出")
+            return False
+        if not self._can_submit(symbol, "Sell"):
             return False
 
         pos = self.positions[symbol]
@@ -263,16 +293,19 @@ class AutoTrader:
             # 取消超 24h 未成交订单
             now = datetime.now()
             for oid, order in list(self.orders.items()):
-                if any(s in str(order["status"]).upper() for s in ["FILLED", "CANCELED", "REJECTED"]):
+                if _order_finished(order["status"]):
                     continue
                 try:
                     t = datetime.strptime(order["time"], "%Y-%m-%d %H:%M:%S")
-                    if (now - t).total_seconds() > 86400:
+                except (ValueError, TypeError):
+                    continue
+                if (now - t).total_seconds() > 86400:
+                    try:
                         self.trade_ctx.cancel_order(order_id=oid)
-                        self.orders[oid]["status"] = "CANCELED"
-                        logger.info(f"取消超时订单 {oid}")
-                except Exception:
-                    pass
+                    except Exception:
+                        pass  # 订单可能已在交易所侧终结，本地标记即可
+                    self.orders[oid]["status"] = "CANCELED"
+                    logger.info(f"取消超时订单 {oid}")
             await self.save_state()
         except Exception as e:
             logger.error(f"更新订单状态失败: {e}")
@@ -287,16 +320,20 @@ class AutoTrader:
         await self.update_market_data()
         sl = -abs(self.cfg["stop_loss"])
         tp = abs(self.cfg["take_profit"])
+        outside_rth = self.cfg.get("outside_rth", False)
         for sym, pos in list(self.positions.items()):
+            # 与信号交易同样受交易时段门控，休市时下单只会被拒
+            if not _in_trading_hours(sym, self.cfg["trading_hours"], outside_rth):
+                continue
             cost = float(pos.get("cost_price", 0))
             curr = float(pos.get("current_price", 0))
             if cost <= 0 or curr <= 0:
                 continue
             ratio = (curr - cost) / cost
-            if ratio <= sl:
+            if ratio <= sl and self._can_submit(sym, "Sell"):
                 logger.warning(f"止损触发 {sym}: {ratio:.2%}  止损线 {sl:.2%}")
                 await self.place_sell_order(sym, curr)
-            elif ratio >= tp:
+            elif ratio >= tp and self._can_submit(sym, "Sell"):
                 logger.warning(f"止盈触发 {sym}: {ratio:.2%}  止盈线 {tp:.2%}")
                 await self.place_sell_order(sym, curr)
 
@@ -341,7 +378,7 @@ class AutoTrader:
                 state = json.load(f)
             self.orders = state.get("orders", {})
             self.is_trading = state.get("is_trading", False)
-            await self.update_positions()
+            # 持仓在 start() 初始化交易上下文之后再拉取，此处 trade_ctx 尚未就绪
             return True
         except Exception as e:
             logger.error(f"加载状态失败: {e}")
