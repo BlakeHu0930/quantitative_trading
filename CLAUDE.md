@@ -126,9 +126,10 @@ plots/optimizations/        ← 优化图表
 
 ## Risk Control
 
-- 止损 / 止盈: CLI 参数 `--stop-loss` / `--take-profit`（单位 %）
-- 最大持仓数: `--max-positions`
-- 单仓比例: `--position-size`（单位 %）
+- 止损 / 止盈: CLI 参数 `--stop-loss` / `--take-profit`（单位 %）；默认值在 `src/config.py` 的 `DEFAULT_TRADE`（小数形式，如 0.05）
+- 最大持仓数: `--max-positions`；单仓比例: `--position-size`（单位 %）
+- 下单冷却: `DEFAULT_TRADE["order_cooldown"]`（默认 300 秒），同标的同方向已有在场订单或冷却期内不重复下单
+- 止损/止盈与信号交易均受交易时段门控（`DEFAULT_TRADE["trading_hours"]`，美股 `--outside-rth` 放开）
 - 默认 paper 模式，live 模式需显式 `--mode live`
 
 ## Output Locations
