@@ -11,7 +11,8 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from longport.openapi import Config, TradeContext, QuoteContext, OrderSide, OrderType, TimeInForceType, Order, OrderStatus
+from src.data import get_longport_config
+from longport.openapi import TradeContext, QuoteContext, OrderSide, OrderType, TimeInForceType, Order, OrderStatus
 import logging
 import decimal
 import enum
@@ -30,11 +31,8 @@ logger = logging.getLogger("AutoTrader")
 load_dotenv()
 
 # 长桥API配置
-app_key = os.getenv('LONGPORT_APP_KEY')
-app_secret = os.getenv('LONGPORT_APP_SECRET')
-access_token = os.getenv('LONGPORT_ACCESS_TOKEN')
 
-config = Config(app_key=app_key, app_secret=app_secret, access_token=access_token)
+config = get_longport_config()
 
 # 交易配置
 TRADE_CONFIG = {

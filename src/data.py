@@ -18,7 +18,11 @@ def get_longport_config() -> Config:
             "缺少 LongPort 凭证，请在 .env 中设置 "
             "LONGPORT_APP_KEY / LONGPORT_APP_SECRET / LONGPORT_ACCESS_TOKEN"
         )
-    return Config(app_key=app_key, app_secret=app_secret, access_token=access_token)
+    # 新版 SDK 使用工厂方法；旧版仍通过构造函数创建配置。
+    factory = getattr(Config, "from_apikey", None)
+    if factory is None:
+        factory = Config
+    return factory(app_key=app_key, app_secret=app_secret, access_token=access_token)
 
 
 _quote_ctx = None

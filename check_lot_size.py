@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-from longport.openapi import Config, QuoteContext
+from src.data import get_longport_config
+from longport.openapi import QuoteContext
 import os
 from dotenv import load_dotenv
 
@@ -9,11 +10,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # 长桥API配置
-app_key = os.getenv('LONGPORT_APP_KEY')
-app_secret = os.getenv('LONGPORT_APP_SECRET')
-access_token = os.getenv('LONGPORT_ACCESS_TOKEN')
 
-config = Config(app_key=app_key, app_secret=app_secret, access_token=access_token)
+config = get_longport_config()
 
 def check_lot_size(symbol):
     """查询股票的交易单位（手数）"""
